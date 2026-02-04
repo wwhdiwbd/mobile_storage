@@ -1,0 +1,1 @@
+adb shell "/data/local/tmp/fio --name=seq_4x4k --ioengine=libaio --direct=1 --rw=read --bs=4k --iodepth=4 --numjobs=1 --size=1G --filename=/data/local/tmp/fio_test"
