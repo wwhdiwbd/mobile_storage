@@ -43,7 +43,8 @@ Write-Host "`n" + ("=" * 80) -ForegroundColor Yellow
 Write-Host "Phase 2: Sequential Read Performance Test" -ForegroundColor Yellow
 Write-Host ("=" * 80) -ForegroundColor Yellow
 
-$blockSizes = @("4k", "8k", "16k", "32k", "64k", "128k", "256k", "512k", "1m")
+# $blockSizes = @("4k", "8k", "16k", "32k", "64k", "128k", "256k", "512k", "1m")
+$blockSizes = @("4k", "16k")
 $testSize = "1G"
 $runtime = 15
 $results = @()

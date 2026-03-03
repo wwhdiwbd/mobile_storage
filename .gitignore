@@ -4,3 +4,4 @@
 *.log
 linux*
 userfaultfd*
+*.json
