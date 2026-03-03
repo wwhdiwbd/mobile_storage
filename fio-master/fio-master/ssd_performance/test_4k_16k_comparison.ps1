@@ -1,14 +1,17 @@
 # ============================================================
-# FIO 4K / 16K Sequential Read & Write Performance Test
+# FIO 4K / 16K Sequential Read Performance Test
 # ------------------------------------------------------------
 # Phase 1 : numjobs sweep  (1, 2, 4)   – iodepth=1 fixed
-# Phase 2 : iodepth sweep  (1-8)       – numjobs=1 fixed
-# Block sizes : 4k, 16k
+# Phase 2 : iodepth sweep  (1-8)       – numjobs=1 fixed  [可跳过]
+# Block sizes : 4k, 16k  |  RW : seq-read only
 # NOTE: This device's fio only supports ioengine=sync.
-#       With sync engine iodepth > 1 has no effect on actual concurrency;
-#       the iodepth sweep records the parameter for completeness.
+#       With sync engine iodepth > 1 has no effect on actual concurrency.
+# Stability measures:
+#   - drop page-cache before every run  (adb shell sync + drop_caches)
+#   - $cooldownBetweenRuns  seconds between individual runs
+#   - $cooldownBetweenConfigs seconds between configurations
 # Each config repeats 3 times; all raw values + average saved
-# Output : fio_numjobs_results_<ts>.csv / fio_iodepth_results_<ts>.csv
+# Output : fio_numjobs_results_<ts>.csv  [fio_iodepth_results_<ts>.csv]
 # ============================================================
 
 $testDir   = "/data/local/tmp"
@@ -24,8 +27,11 @@ $runs          = 3
 $blockSizes    = @("4k", "16k")
 $numjobsList   = @(1, 2, 4)
 $iodepthList   = @(1, 2, 3, 4, 5, 6, 7, 8)
-$rwModes       = @("read", "write")
-$timestamp     = Get-Date -Format "yyyyMMdd_HHmmss"
+$rwModes               = @("read")          # write 已移除；仅测 seq-read
+$skipIodepth           = $true              # $true → 跳过 Phase 2（iodepth sweep）
+$cooldownBetweenRuns   = 5                  # 同一 config 内两次 run 之间的等待秒数
+$cooldownBetweenConfigs = 20               # 不同 config 之间的等待秒数（让存储控制器恢复）
+$timestamp             = Get-Date -Format "yyyyMMdd_HHmmss"
 
 # ---- helpers -----------------------------------------------
 
@@ -109,6 +115,14 @@ function Run-Config {
     $bwArr = @(); $iopsArr = @(); $latArr = @()
 
     for ($r = 1; $r -le $runs; $r++) {
+        if ($r -gt 1) {
+            Write-Host ("    [Cooldown ${cooldownBetweenRuns}s before next run...]") -ForegroundColor DarkGray
+            Start-Sleep -Seconds $cooldownBetweenRuns
+        }
+        # Drop page-cache to avoid read-cache warming across runs
+        Write-Host ("    [Drop caches...]") -ForegroundColor DarkGray -NoNewline
+        adb shell "sync; echo 3 > /proc/sys/vm/drop_caches" 2>&1 | Out-Null
+        Write-Host (" done") -ForegroundColor DarkGray
         Write-Host ("    Run $r/$runs ...") -ForegroundColor Gray -NoNewline
         $res = Invoke-FioRun -bs $bs -rw $rw -numjobs $numjobs -iodepth $iodepth
         $bwArr   += $res.BW
@@ -156,9 +170,10 @@ Write-Host "    numjobs sweep: $($numjobsList -join ', ')  (iodepth fixed=1)"
 Write-Host "    iodepth sweep: $($iodepthList -join ', ')  (numjobs fixed=1)"
 Write-Host ""
 
-$totalConfigs = ($blockSizes.Count * $numjobsList.Count * $rwModes.Count) +
-                ($blockSizes.Count * $iodepthList.Count * $rwModes.Count)
+$totalConfigs = $blockSizes.Count * $numjobsList.Count * $rwModes.Count
+if (-not $skipIodepth) { $totalConfigs += $blockSizes.Count * $iodepthList.Count * $rwModes.Count }
 Write-Host "  Total configurations: $totalConfigs x $runs runs = $($totalConfigs * $runs) fio jobs" -ForegroundColor Cyan
+Write-Host "  skipIodepth=$skipIodepth  cooldownBetweenRuns=${cooldownBetweenRuns}s  cooldownBetweenConfigs=${cooldownBetweenConfigs}s" -ForegroundColor Cyan
 Write-Host ""
 
 $numjobsResults = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -174,22 +189,30 @@ foreach ($bs in $blockSizes) {
         foreach ($rw in $rwModes) {
             $row = Run-Config -bs $bs -rw $rw -numjobs $nj -iodepth 1
             $numjobsResults.Add($row)
+            Write-Host ("  [Config cooldown ${cooldownBetweenConfigs}s...]") -ForegroundColor DarkGray
+            Start-Sleep -Seconds $cooldownBetweenConfigs
         }
     }
 }
 
 # --------------------------------------------------
-# Phase 2 : iodepth sweep  (numjobs = 1)
+# Phase 2 : iodepth sweep  (numjobs = 1)  [由 $skipIodepth 控制]
 # --------------------------------------------------
-Show-Banner "Phase 2 – iodepth Sweep  [numjobs=1 fixed, NOTE: sync engine ignores iodepth>1]" "Yellow"
+if (-not $skipIodepth) {
+    Show-Banner "Phase 2 – iodepth Sweep  [numjobs=1 fixed, NOTE: sync engine ignores iodepth>1]" "Yellow"
 
-foreach ($bs in $blockSizes) {
-    foreach ($depth in $iodepthList) {
-        foreach ($rw in $rwModes) {
-            $row = Run-Config -bs $bs -rw $rw -numjobs 1 -iodepth $depth
-            $iodepthResults.Add($row)
+    foreach ($bs in $blockSizes) {
+        foreach ($depth in $iodepthList) {
+            foreach ($rw in $rwModes) {
+                $row = Run-Config -bs $bs -rw $rw -numjobs 1 -iodepth $depth
+                $iodepthResults.Add($row)
+                Write-Host ("  [Config cooldown ${cooldownBetweenConfigs}s...]") -ForegroundColor DarkGray
+                Start-Sleep -Seconds $cooldownBetweenConfigs
+            }
         }
     }
+} else {
+    Show-Banner "Phase 2 – iodepth Sweep  [SKIPPED: `$skipIodepth=`$true]" "DarkGray"
 }
 
 # --------------------------------------------------
@@ -202,10 +225,11 @@ adb shell "rm -f $testFile"
 # Save CSVs
 # --------------------------------------------------
 $csvNumjobs = "fio_numjobs_results_${timestamp}.csv"
-$csvIodepth = "fio_iodepth_results_${timestamp}.csv"
-
 $numjobsResults | Export-Csv -Path $csvNumjobs -NoTypeInformation -Encoding UTF8
-$iodepthResults | Export-Csv -Path $csvIodepth -NoTypeInformation -Encoding UTF8
+if (-not $skipIodepth) {
+    $csvIodepth = "fio_iodepth_results_${timestamp}.csv"
+    $iodepthResults | Export-Csv -Path $csvIodepth -NoTypeInformation -Encoding UTF8
+}
 
 # --------------------------------------------------
 # Print summary tables
@@ -216,15 +240,17 @@ $numjobsResults | Format-Table BlockSize, RW, numjobs, iodepth,
     Run1_IOPS, Run2_IOPS, Run3_IOPS, Avg_IOPS,
     Run1_Lat_us, Run2_Lat_us, Run3_Lat_us, Avg_Lat_us -AutoSize
 
-Show-Banner "Results – Phase 2: iodepth Sweep" "Green"
-$iodepthResults | Format-Table BlockSize, RW, numjobs, iodepth,
-    Run1_BW_MBps, Run2_BW_MBps, Run3_BW_MBps, Avg_BW_MBps,
-    Run1_IOPS, Run2_IOPS, Run3_IOPS, Avg_IOPS,
-    Run1_Lat_us, Run2_Lat_us, Run3_Lat_us, Avg_Lat_us -AutoSize
+if (-not $skipIodepth) {
+    Show-Banner "Results – Phase 2: iodepth Sweep" "Green"
+    $iodepthResults | Format-Table BlockSize, RW, numjobs, iodepth,
+        Run1_BW_MBps, Run2_BW_MBps, Run3_BW_MBps, Avg_BW_MBps,
+        Run1_IOPS, Run2_IOPS, Run3_IOPS, Avg_IOPS,
+        Run1_Lat_us, Run2_Lat_us, Run3_Lat_us, Avg_Lat_us -AutoSize
+}
 
 Show-Banner "All Done" "Green"
 Write-Host "  Results saved to:" -ForegroundColor Yellow
 Write-Host "    $csvNumjobs" -ForegroundColor Cyan
-Write-Host "    $csvIodepth" -ForegroundColor Cyan
+if (-not $skipIodepth) { Write-Host "    $csvIodepth" -ForegroundColor Cyan }
 Write-Host ("=" * 72) -ForegroundColor Green
 Stop-Transcript | Out-Null
